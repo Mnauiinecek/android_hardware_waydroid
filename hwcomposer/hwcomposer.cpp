@@ -57,7 +57,6 @@
 #include "modes/multi-window.h"
 #include "modes/single-window.h"
 
-using ::android::hardware::configureRpcThreadpool;
 using ::android::hardware::joinRpcThreadpool;
 
 using ::vendor::waydroid::display::V1_2::IWaydroidDisplay;
@@ -103,7 +102,19 @@ namespace {
 
     buffer *get_wl_buffer(waydroid_hwc_composer_device_1 *pdev, hwc_layer_1_t *layer, size_t pos) {
         const auto& gralloc_handler = pdev->gralloc_handler;
+        if (!layer->handle) {
+            // FRAMEBUFFER_TARGET metadata comes from the HIDL side,
+            // so the metadata check below doesn't catch a null handle.
+            ALOGW("get_wl_buffer: skipping pos=%zu, layer has no buffer handle", pos);
+            return nullptr;
+        }
         auto metadata = gralloc_handler.get_buffer_metadata(pdev->display, layer, pos);
+        if (!metadata.format) {
+            // hwc_set can run before the setLayerHandleInfo HIDL call arrives.
+            ALOGW("get_wl_buffer: skipping pos=%zu, metadata not ready (map size=%zu)",
+                  pos, pdev->display->layer_handles_ext.size());
+            return nullptr;
+        }
         buffer *buf = find_cached_buffer(pdev, metadata, layer->handle);
 
         if (!buf) {
@@ -641,7 +652,8 @@ static void* hwc_binder_thread(void* data) {
     sp<IWaydroidClipboard> waydroidClipboard;
 
     setpriority(PRIO_PROCESS, 0, HAL_PRIORITY_URGENT_DISPLAY);
-    configureRpcThreadpool(1, true /*callerWillJoin*/);
+    // Don't configure the threadpool here: composer@2.1-service main() already
+    // set it to 4 threads, and shrinking it to 1 aborts the process.
 
     waydroidDisplay = new WaydroidDisplay(pdev->display);
     if (waydroidDisplay == nullptr) {
